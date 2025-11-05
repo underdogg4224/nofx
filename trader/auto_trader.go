@@ -37,6 +37,13 @@ type AutoTraderConfig struct {
 	AsterSigner     string // Aster API钱包地址
 	AsterPrivateKey string // Aster API钱包私钥
 
+	// Drift配置
+	DriftNetwork      string // "mainnet-beta" or "devnet"
+	DriftPrivateKey   string // Solana wallet private key (base58)
+	DriftRPCURL       string // Custom RPC URL (optional)
+	DriftWSURL        string // Custom WebSocket URL (optional)
+	DriftSubAccountID uint16 // Drift subaccount ID (0-9)
+
 	CoinPoolAPIURL string
 
 	// AI配置
@@ -178,6 +185,22 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)
 		if err != nil {
 			return nil, fmt.Errorf("初始化Aster交易器失败: %w", err)
+		}
+	case "drift":
+		log.Printf("🏦 [%s] 使用Drift Protocol交易 (Solana)", config.Name)
+		network := config.DriftNetwork
+		if network == "" {
+			network = "mainnet-beta" // Default to mainnet
+		}
+		trader, err = NewDriftTrader(
+			network,
+			config.DriftRPCURL,
+			config.DriftWSURL,
+			config.DriftPrivateKey,
+			config.DriftSubAccountID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("初始化Drift交易器失败: %w", err)
 		}
 	default:
 		return nil, fmt.Errorf("不支持的交易平台: %s", config.Exchange)

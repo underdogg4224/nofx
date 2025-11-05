@@ -248,6 +248,7 @@ func (d *Database) initDefaultData() error {
 		{"binance", "Binance Futures", "binance"},
 		{"hyperliquid", "Hyperliquid", "hyperliquid"},
 		{"aster", "Aster DEX", "aster"},
+		{"drift", "Drift Protocol", "drift"},
 	}
 
 	for _, exchange := range exchanges {
