@@ -188,6 +188,10 @@ func (d *Database) createTables() error {
 		`ALTER TABLE exchanges ADD COLUMN aster_user TEXT DEFAULT ''`,
 		`ALTER TABLE exchanges ADD COLUMN aster_signer TEXT DEFAULT ''`,
 		`ALTER TABLE exchanges ADD COLUMN aster_private_key TEXT DEFAULT ''`,
+		`ALTER TABLE exchanges ADD COLUMN solana_network TEXT DEFAULT 'mainnet-beta'`,
+		`ALTER TABLE exchanges ADD COLUMN solana_rpc_url TEXT DEFAULT ''`,
+		`ALTER TABLE exchanges ADD COLUMN solana_ws_url TEXT DEFAULT ''`,
+		`ALTER TABLE exchanges ADD COLUMN solana_wallet_key TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN custom_prompt TEXT DEFAULT ''`,
 		`ALTER TABLE traders ADD COLUMN override_base_prompt BOOLEAN DEFAULT 0`,
 		`ALTER TABLE traders ADD COLUMN is_cross_margin BOOLEAN DEFAULT 1`,             // 默认为全仓模式
@@ -404,9 +408,14 @@ type ExchangeConfig struct {
 	// Hyperliquid 特定字段
 	HyperliquidWalletAddr string `json:"hyperliquidWalletAddr"`
 	// Aster 特定字段
-	AsterUser       string    `json:"asterUser"`
-	AsterSigner     string    `json:"asterSigner"`
-	AsterPrivateKey string    `json:"asterPrivateKey"`
+	AsterUser       string `json:"asterUser"`
+	AsterSigner     string `json:"asterSigner"`
+	AsterPrivateKey string `json:"asterPrivateKey"`
+	// Solana 特定字段
+	SolanaNetwork   string `json:"solanaNetwork"`
+	SolanaRPCURL    string `json:"solanaRpcUrl"`
+	SolanaWSURL     string `json:"solanaWsUrl"`
+	SolanaWalletKey string `json:"solanaWalletKey"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -662,12 +671,16 @@ func (d *Database) UpdateAIModel(userID, id string, enabled bool, apiKey, custom
 // GetExchanges 获取用户的交易所配置
 func (d *Database) GetExchanges(userID string) ([]*ExchangeConfig, error) {
 	rows, err := d.db.Query(`
-		SELECT id, user_id, name, type, enabled, api_key, secret_key, testnet, 
+		SELECT id, user_id, name, type, enabled, api_key, secret_key, testnet,
 		       COALESCE(hyperliquid_wallet_addr, '') as hyperliquid_wallet_addr,
 		       COALESCE(aster_user, '') as aster_user,
 		       COALESCE(aster_signer, '') as aster_signer,
 		       COALESCE(aster_private_key, '') as aster_private_key,
-		       created_at, updated_at 
+		       COALESCE(solana_network, 'mainnet-beta') as solana_network,
+		       COALESCE(solana_rpc_url, '') as solana_rpc_url,
+		       COALESCE(solana_ws_url, '') as solana_ws_url,
+		       COALESCE(solana_wallet_key, '') as solana_wallet_key,
+		       created_at, updated_at
 		FROM exchanges WHERE user_id = ? ORDER BY id
 	`, userID)
 	if err != nil {
@@ -684,6 +697,8 @@ func (d *Database) GetExchanges(userID string) ([]*ExchangeConfig, error) {
 			&exchange.Enabled, &exchange.APIKey, &exchange.SecretKey, &exchange.Testnet,
 			&exchange.HyperliquidWalletAddr, &exchange.AsterUser,
 			&exchange.AsterSigner, &exchange.AsterPrivateKey,
+			&exchange.SolanaNetwork, &exchange.SolanaRPCURL,
+			&exchange.SolanaWSURL, &exchange.SolanaWalletKey,
 			&exchange.CreatedAt, &exchange.UpdatedAt,
 		)
 		if err != nil {
@@ -887,6 +902,10 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 			COALESCE(e.aster_user, '') as aster_user,
 			COALESCE(e.aster_signer, '') as aster_signer,
 			COALESCE(e.aster_private_key, '') as aster_private_key,
+			COALESCE(e.solana_network, 'mainnet-beta') as solana_network,
+			COALESCE(e.solana_rpc_url, '') as solana_rpc_url,
+			COALESCE(e.solana_ws_url, '') as solana_ws_url,
+			COALESCE(e.solana_wallet_key, '') as solana_wallet_key,
 			e.created_at, e.updated_at
 		FROM traders t
 		JOIN ai_models a ON t.ai_model_id = a.id AND t.user_id = a.user_id
@@ -906,6 +925,7 @@ func (d *Database) GetTraderConfig(userID, traderID string) (*TraderRecord, *AIM
 		&exchange.ID, &exchange.UserID, &exchange.Name, &exchange.Type, &exchange.Enabled,
 		&exchange.APIKey, &exchange.SecretKey, &exchange.Testnet,
 		&exchange.HyperliquidWalletAddr, &exchange.AsterUser, &exchange.AsterSigner, &exchange.AsterPrivateKey,
+		&exchange.SolanaNetwork, &exchange.SolanaRPCURL, &exchange.SolanaWSURL, &exchange.SolanaWalletKey,
 		&exchange.CreatedAt, &exchange.UpdatedAt,
 	)
 
