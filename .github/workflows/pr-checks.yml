@@ -210,6 +210,19 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+      - name: Run Go tests
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Generate coverage report
+        run: |
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+          echo "Total test coverage: ${coverage}%"
+          # Optional: Enforce minimum coverage threshold (uncomment to enable)
+          # if (( $(echo "$coverage < 60" | bc -l) )); then
+          #   echo "❌ Coverage below 60%"
+          #   exit 1
+          # fi
+
       - name: Build
         run: go build -v -o nofx
 
@@ -239,6 +252,15 @@ jobs:
       - name: Install dependencies
         working-directory: ./web
         run: npm ci
+
+      - name: Run frontend tests
+        working-directory: ./web
+        run: npm run test:run
+
+      - name: Generate test coverage
+        working-directory: ./web
+        run: npm run test:coverage
+        continue-on-error: true
 
       - name: Build and Type Check
         working-directory: ./web
