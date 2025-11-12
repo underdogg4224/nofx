@@ -9,6 +9,8 @@ import (
 	"nofx/config"
 	"nofx/decision"
 	"nofx/manager"
+	"nofx/security"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +37,9 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 	// 启用CORS
 	router.Use(corsMiddleware())
 
+	// 启用安全头
+	router.Use(securityHeadersMiddleware())
+
 	s := &Server{
 		router:        router,
 		traderManager: traderManager,
@@ -48,15 +53,147 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 	return s
 }
 
-// corsMiddleware CORS中间件
+// corsMiddleware CORS中间件（改进的安全版本）
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+
+		// 获取允许的源列表（从环境变量或使用默认值）
+		allowedOrigins := getAllowedOrigins()
+
+		// 检查origin是否在允许列表中
+		if isOriginAllowed(origin, allowedOrigins) {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else if len(allowedOrigins) == 1 && allowedOrigins[0] == "*" {
+			// 仅在明确配置为 * 时才允许所有源（开发模式）
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Max-Age", "3600")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusOK)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// securityHeadersMiddleware 添加安全响应头
+func securityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 防止点击劫持
+		c.Writer.Header().Set("X-Frame-Options", "DENY")
+
+		// 防止 MIME 类型嗅探
+		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+
+		// XSS 保护
+		c.Writer.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		// 引荐来源策略
+		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// 内容安全策略（适度宽松，适用于现代应用）
+		csp := "default-src 'self'; " +
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+			"style-src 'self' 'unsafe-inline'; " +
+			"img-src 'self' data: https:; " +
+			"font-src 'self' data:; " +
+			"connect-src 'self' https: wss:; " +
+			"frame-ancestors 'none';"
+		c.Writer.Header().Set("Content-Security-Policy", csp)
+
+		// 权限策略
+		c.Writer.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+		// HSTS（仅在HTTPS时启用）
+		if c.Request.TLS != nil {
+			c.Writer.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		c.Next()
+	}
+}
+
+// getAllowedOrigins 获取允许的CORS源列表
+func getAllowedOrigins() []string {
+	// 从环境变量读取
+	originsEnv := os.Getenv("NOFX_ALLOWED_ORIGINS")
+	if originsEnv != "" {
+		return strings.Split(originsEnv, ",")
+	}
+
+	// 默认配置：本地开发环境
+	return []string{
+		"http://localhost:3000",
+		"http://localhost:5173",
+		"http://127.0.0.1:3000",
+		"http://127.0.0.1:5173",
+		"*", // 允许所有源（仅用于开发，生产环境应删除）
+	}
+}
+
+// isOriginAllowed 检查源是否在允许列表中
+func isOriginAllowed(origin string, allowedOrigins []string) bool {
+	if origin == "" {
+		return false
+	}
+
+	for _, allowed := range allowedOrigins {
+		if allowed == "*" || allowed == origin {
+			return true
+		}
+	}
+	return false
+}
+
+// rateLimitMiddleware 速率限制中间件
+func rateLimitMiddleware(limitType string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 使用IP地址作为标识符
+		identifier := c.ClientIP()
+
+		// 根据类型选择不同的限制器
+		var limiter *security.RateLimiter
+		var endpointName string
+
+		switch limitType {
+		case "login":
+			limiter = security.GetLoginLimiter()
+			endpointName = "登录"
+		case "registration":
+			limiter = security.GetRegistrationLimiter()
+			endpointName = "注册"
+		case "otp":
+			limiter = security.GetOTPLimiter()
+			endpointName = "OTP验证"
+		default:
+			limiter = security.GetAPILimiter()
+			endpointName = "API"
+		}
+
+		// 检查是否允许
+		if !limiter.Allow(identifier) {
+			// 记录安全事件
+			security.LogRateLimitExceeded(identifier, c.Request.URL.Path)
+
+			// 检查是否持续违规（可能是攻击）
+			violations := limiter.GetViolations(identifier)
+			if violations >= 10 {
+				log.Printf("🚨 [SECURITY] 检测到可能的暴力攻击: IP=%s, 端点=%s, 连续违规=%d次",
+					identifier, c.Request.URL.Path, violations)
+			}
+
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": fmt.Sprintf("%s请求过于频繁，请稍后再试", endpointName),
+				"code":  "RATE_LIMIT_EXCEEDED",
+			})
+			c.Abort()
 			return
 		}
 
@@ -72,11 +209,11 @@ func (s *Server) setupRoutes() {
 		// 健康检查
 		api.Any("/health", s.handleHealth)
 
-		// 认证相关路由（无需认证）
-		api.POST("/register", s.handleRegister)
-		api.POST("/login", s.handleLogin)
-		api.POST("/verify-otp", s.handleVerifyOTP)
-		api.POST("/complete-registration", s.handleCompleteRegistration)
+		// 认证相关路由（带速率限制）
+		api.POST("/register", rateLimitMiddleware("registration"), s.handleRegister)
+		api.POST("/login", rateLimitMiddleware("login"), s.handleLogin)
+		api.POST("/verify-otp", rateLimitMiddleware("otp"), s.handleVerifyOTP)
+		api.POST("/complete-registration", rateLimitMiddleware("registration"), s.handleCompleteRegistration)
 
 		// 系统支持的模型和交易所（无需认证）
 		api.GET("/supported-models", s.handleGetSupportedModels)
@@ -1354,21 +1491,38 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
+	// 获取客户端信息用于安全日志
+	ipAddress := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+
+	// 清理和验证输入
+	req.Email = security.SanitizeEmail(req.Email)
+	if !security.ValidateEmail(req.Email) {
+		security.LogLoginAttempt(req.Email, ipAddress, userAgent, false, "Invalid email format")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "邮箱格式无效"})
+		return
+	}
+
 	// 获取用户信息
 	user, err := s.database.GetUserByEmail(req.Email)
 	if err != nil {
+		// 记录失败的登录尝试
+		security.LogLoginAttempt(req.Email, ipAddress, userAgent, false, "User not found")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "邮箱或密码错误"})
 		return
 	}
 
 	// 验证密码
 	if !auth.CheckPassword(req.Password, user.PasswordHash) {
+		// 记录失败的登录尝试（密码错误）
+		security.LogLoginAttempt(req.Email, ipAddress, userAgent, false, "Invalid password")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "邮箱或密码错误"})
 		return
 	}
 
 	// 检查OTP是否已验证
 	if !user.OTPVerified {
+		security.LogLoginAttempt(req.Email, ipAddress, userAgent, false, "OTP not verified")
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":              "账户未完成OTP设置",
 			"user_id":            user.ID,
@@ -1376,6 +1530,17 @@ func (s *Server) handleLogin(c *gin.Context) {
 		})
 		return
 	}
+
+	// 记录成功的第一阶段登录（密码验证通过，等待OTP）
+	security.LogEvent(security.SecurityEvent{
+		EventType: security.EventLoginSuccess,
+		UserID:    user.ID,
+		Email:     user.Email,
+		IPAddress: ipAddress,
+		UserAgent: userAgent,
+		Success:   true,
+		Message:   "Password verified, waiting for OTP",
+	})
 
 	// 返回需要OTP验证的状态
 	c.JSON(http.StatusOK, gin.H{
@@ -1398,15 +1563,21 @@ func (s *Server) handleVerifyOTP(c *gin.Context) {
 		return
 	}
 
+	// 获取客户端信息用于安全日志
+	ipAddress := c.ClientIP()
+
 	// 获取用户信息
 	user, err := s.database.GetUserByID(req.UserID)
 	if err != nil {
+		security.LogOTPAttempt(req.UserID, "", ipAddress, false)
 		c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
 		return
 	}
 
 	// 验证OTP
 	if !auth.VerifyOTP(user.OTPSecret, req.OTPCode) {
+		// 记录失败的OTP验证
+		security.LogOTPAttempt(user.ID, user.Email, ipAddress, false)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "验证码错误"})
 		return
 	}
@@ -1417,6 +1588,17 @@ func (s *Server) handleVerifyOTP(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成token失败"})
 		return
 	}
+
+	// 记录成功的OTP验证和完整登录
+	security.LogOTPAttempt(user.ID, user.Email, ipAddress, true)
+	security.LogEvent(security.SecurityEvent{
+		EventType: security.EventLoginSuccess,
+		UserID:    user.ID,
+		Email:     user.Email,
+		IPAddress: ipAddress,
+		Success:   true,
+		Message:   "Complete login successful (password + OTP)",
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"token":   token,

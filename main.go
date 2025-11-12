@@ -10,6 +10,7 @@ import (
 	"nofx/manager"
 	"nofx/market"
 	"nofx/pool"
+	"nofx/security"
 	"os"
 	"os/signal"
 	"strconv"
@@ -162,6 +163,37 @@ func main() {
 		log.Fatalf("❌ 初始化数据库失败: %v", err)
 	}
 	defer database.Close()
+
+	// 🔐 Initialize security systems
+	log.Printf("🔐 初始化安全系统...")
+
+	// 1. Initialize encryption for API keys
+	encryptionSecret, err := security.GetMasterSecretFromEnv()
+	if err != nil {
+		log.Printf("⚠️  获取加密密钥失败: %v", err)
+		log.Printf("⚠️  API密钥将不加密存储 - 建议设置 NOFX_ENCRYPTION_SECRET 环境变量")
+	} else {
+		if err := security.InitializeEncryption(encryptionSecret); err != nil {
+			log.Printf("⚠️  初始化加密系统失败: %v", err)
+		} else {
+			log.Printf("✓ 加密系统已启用（AES-256-GCM）")
+		}
+	}
+
+	// 2. Initialize security event logging
+	securityLogEnabled := os.Getenv("NOFX_SECURITY_LOGGING") != "false" // Enabled by default
+	if err := security.InitializeSecurityLogger("logs/security.log", securityLogEnabled); err != nil {
+		log.Printf("⚠️  初始化安全日志失败: %v", err)
+	} else if securityLogEnabled {
+		log.Printf("✓ 安全事件日志已启用")
+	}
+	defer security.CloseSecurityLogger()
+
+	// 3. Initialize rate limiters
+	security.InitializeRateLimiters()
+	log.Printf("✓ 速率限制已启用（防止暴力破解）")
+
+	fmt.Println()
 
 	// 同步config.json到数据库
 	if err := syncConfigToDatabase(database); err != nil {
