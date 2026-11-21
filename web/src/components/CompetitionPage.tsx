@@ -26,13 +26,11 @@ export function CompetitionPage() {
 
   const handleTraderClick = async (traderId: string) => {
     try {
-      const traderConfig = await api.getTraderConfig(traderId)
+      const traderConfig = await api.getPublicTraderConfig(traderId)
       setSelectedTrader(traderConfig)
       setIsModalOpen(true)
     } catch (error) {
       console.error('Failed to fetch trader config:', error)
-      // 对于未登录用户，不显示详细配置，这是正常行为
-      // 竞赛页面主要用于查看排行榜和基本信息
     }
   }
 

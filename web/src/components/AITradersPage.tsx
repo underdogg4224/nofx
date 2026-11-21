@@ -301,35 +301,23 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     if (!confirm(t('confirmDeleteModel', language))) return
 
     try {
-      const updatedModels =
-        allModels?.map((m) =>
-          m.id === modelId
-            ? {
-                ...m,
-                apiKey: '',
-                customApiUrl: '',
-                customModelName: '',
-                enabled: false,
-              }
-            : m
-        ) || []
+      const targetModel = allModels?.find((m) => m.id === modelId)
+      if (!targetModel) return
 
       const request = {
-        models: Object.fromEntries(
-          updatedModels.map((model) => [
-            model.provider, // 使用 provider 而不是 id
-            {
-              enabled: model.enabled,
-              api_key: model.apiKey || '',
-              custom_api_url: model.customApiUrl || '',
-              custom_model_name: model.customModelName || '',
-            },
-          ])
-        ),
+        models: {
+          [targetModel.provider]: {
+            enabled: false,
+            api_key: '',
+            custom_api_url: '',
+            custom_model_name: '',
+          },
+        },
       }
 
       await api.updateModelConfigs(request)
-      setAllModels(updatedModels)
+      const refreshedModels = await api.getModelConfigs()
+      setAllModels(refreshedModels)
       setShowModelModal(false)
       setEditingModel(null)
     } catch (error) {
@@ -347,7 +335,6 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     try {
       // 创建或更新用户的模型配置
       const existingModel = allModels?.find((m) => m.id === modelId)
-      let updatedModels
 
       // 找到要配置的模型（优先从已配置列表，其次从支持列表）
       const modelToUpdate =
@@ -357,44 +344,15 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         return
       }
 
-      if (existingModel) {
-        // 更新现有配置
-        updatedModels =
-          allModels?.map((m) =>
-            m.id === modelId
-              ? {
-                  ...m,
-                  apiKey,
-                  customApiUrl: customApiUrl || '',
-                  customModelName: customModelName || '',
-                  enabled: true,
-                }
-              : m
-          ) || []
-      } else {
-        // 添加新配置
-        const newModel = {
-          ...modelToUpdate,
-          apiKey,
-          customApiUrl: customApiUrl || '',
-          customModelName: customModelName || '',
-          enabled: true,
-        }
-        updatedModels = [...(allModels || []), newModel]
-      }
-
       const request = {
-        models: Object.fromEntries(
-          updatedModels.map((model) => [
-            model.provider, // 使用 provider 而不是 id
-            {
-              enabled: model.enabled,
-              api_key: model.apiKey || '',
-              custom_api_url: model.customApiUrl || '',
-              custom_model_name: model.customModelName || '',
-            },
-          ])
-        ),
+        models: {
+          [modelToUpdate.provider]: {
+            enabled: true,
+            api_key: apiKey,
+            custom_api_url: customApiUrl || '',
+            custom_model_name: customModelName || '',
+          },
+        },
       }
 
       await api.updateModelConfigs(request)
@@ -415,29 +373,24 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     if (!confirm(t('confirmDeleteExchange', language))) return
 
     try {
-      const updatedExchanges =
-        allExchanges?.map((e) =>
-          e.id === exchangeId
-            ? { ...e, apiKey: '', secretKey: '', enabled: false }
-            : e
-        ) || []
-
       const request = {
-        exchanges: Object.fromEntries(
-          updatedExchanges.map((exchange) => [
-            exchange.id,
-            {
-              enabled: exchange.enabled,
-              api_key: exchange.apiKey || '',
-              secret_key: exchange.secretKey || '',
-              testnet: exchange.testnet || false,
-            },
-          ])
-        ),
+        exchanges: {
+          [exchangeId]: {
+            enabled: false,
+            api_key: '',
+            secret_key: '',
+            testnet: false,
+            hyperliquid_wallet_addr: '',
+            aster_user: '',
+            aster_signer: '',
+            aster_private_key: '',
+          },
+        },
       }
 
       await api.updateExchangeConfigs(request)
-      setAllExchanges(updatedExchanges)
+      const refreshedExchanges = await api.getExchangeConfigs()
+      setAllExchanges(refreshedExchanges)
       setShowExchangeModal(false)
       setEditingExchange(null)
     } catch (error) {
@@ -466,60 +419,19 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         return
       }
 
-      // 创建或更新用户的交易所配置
-      const existingExchange = allExchanges?.find((e) => e.id === exchangeId)
-      let updatedExchanges
-
-      if (existingExchange) {
-        // 更新现有配置
-        updatedExchanges =
-          allExchanges?.map((e) =>
-            e.id === exchangeId
-              ? {
-                  ...e,
-                  apiKey,
-                  secretKey,
-                  testnet,
-                  hyperliquidWalletAddr,
-                  asterUser,
-                  asterSigner,
-                  asterPrivateKey,
-                  enabled: true,
-                }
-              : e
-          ) || []
-      } else {
-        // 添加新配置
-        const newExchange = {
-          ...exchangeToUpdate,
-          apiKey,
-          secretKey,
-          testnet,
-          hyperliquidWalletAddr,
-          asterUser,
-          asterSigner,
-          asterPrivateKey,
-          enabled: true,
-        }
-        updatedExchanges = [...(allExchanges || []), newExchange]
-      }
-
       const request = {
-        exchanges: Object.fromEntries(
-          updatedExchanges.map((exchange) => [
-            exchange.id,
-            {
-              enabled: exchange.enabled,
-              api_key: exchange.apiKey || '',
-              secret_key: exchange.secretKey || '',
-              testnet: exchange.testnet || false,
-              hyperliquid_wallet_addr: exchange.hyperliquidWalletAddr || '',
-              aster_user: exchange.asterUser || '',
-              aster_signer: exchange.asterSigner || '',
-              aster_private_key: exchange.asterPrivateKey || '',
-            },
-          ])
-        ),
+        exchanges: {
+          [exchangeId]: {
+            enabled: true,
+            api_key: apiKey || '',
+            secret_key: secretKey || '',
+            testnet: testnet || false,
+            hyperliquid_wallet_addr: hyperliquidWalletAddr || '',
+            aster_user: asterUser || '',
+            aster_signer: asterSigner || '',
+            aster_private_key: asterPrivateKey || '',
+          },
+        },
       }
 
       await api.updateExchangeConfigs(request)
@@ -1530,7 +1442,14 @@ function ExchangeConfigModal({
       if (!apiKey.trim()) return // 只验证私钥，钱包地址自动从私钥生成
       await onSave(selectedExchangeId, apiKey.trim(), '', testnet, '') // 传空字符串，后端自动生成地址
     } else if (selectedExchange?.id === 'aster') {
-      if (!asterUser.trim() || !asterSigner.trim() || !asterPrivateKey.trim())
+      const hasExistingAsterKey = Boolean(
+        editingExchangeId && selectedExchange.asterPrivateKey
+      )
+      if (
+        !asterUser.trim() ||
+        !asterSigner.trim() ||
+        (!asterPrivateKey.trim() && !hasExistingAsterKey)
+      )
         return
       await onSave(
         selectedExchangeId,
@@ -1904,7 +1823,10 @@ function ExchangeConfigModal({
                 (selectedExchange.id === 'aster' &&
                   (!asterUser.trim() ||
                     !asterSigner.trim() ||
-                    !asterPrivateKey.trim())) ||
+                    (!asterPrivateKey.trim() &&
+                      !(
+                        editingExchangeId && selectedExchange.asterPrivateKey
+                      )))) ||
                 (selectedExchange.type === 'cex' &&
                   selectedExchange.id !== 'hyperliquid' &&
                   selectedExchange.id !== 'aster' &&

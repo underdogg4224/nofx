@@ -45,27 +45,59 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
+function parseSavedUser(raw: string | null): User | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (
+      parsed &&
+      typeof parsed.id === 'string' &&
+      typeof parsed.email === 'string'
+    ) {
+      return { id: parsed.id, email: parsed.email }
+    }
+  } catch {
+    // Corrupted localStorage payload; clear it below
+  }
+  localStorage.removeItem('auth_token')
+  localStorage.removeItem('auth_user')
+  return null
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [token, setToken] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
+    let isAdmin = false
+
+    const handleUnauthorized = () => {
+      if (isAdmin) return
+      setUser(null)
+      setToken(null)
+      localStorage.removeItem('auth_token')
+      localStorage.removeItem('auth_user')
+    }
+
+    window.addEventListener('auth:unauthorized', handleUnauthorized)
+
     // 先检查是否为管理员模式（使用带缓存的系统配置获取）
     getSystemConfig()
       .then((data) => {
         if (data.admin_mode) {
+          isAdmin = true
           // 管理员模式下，模拟admin用户
           setUser({ id: 'admin', email: 'admin@localhost' })
           setToken('admin-mode')
         } else {
           // 非管理员模式，检查本地存储中是否有token
           const savedToken = localStorage.getItem('auth_token')
-          const savedUser = localStorage.getItem('auth_user')
+          const savedUser = parseSavedUser(localStorage.getItem('auth_user'))
 
           if (savedToken && savedUser) {
             setToken(savedToken)
-            setUser(JSON.parse(savedUser))
+            setUser(savedUser)
           }
         }
         setIsLoading(false)
@@ -74,14 +106,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.error('Failed to fetch system config:', err)
         // 发生错误时，继续检查本地存储
         const savedToken = localStorage.getItem('auth_token')
-        const savedUser = localStorage.getItem('auth_user')
+        const savedUser = parseSavedUser(localStorage.getItem('auth_user'))
 
         if (savedToken && savedUser) {
           setToken(savedToken)
-          setUser(JSON.parse(savedUser))
+          setUser(savedUser)
         }
         setIsLoading(false)
       })
+
+    return () => {
+      window.removeEventListener('auth:unauthorized', handleUnauthorized)
+    }
   }, [])
 
   const login = async (email: string, password: string) => {

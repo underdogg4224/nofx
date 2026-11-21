@@ -29,12 +29,30 @@ function getAuthHeaders(): Record<string, string> {
   return headers
 }
 
+// Authenticated fetch wrapper that notifies AuthContext when a token expires (401)
+async function authFetch(
+  url: string,
+  init: RequestInit = {}
+): Promise<Response> {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      ...getAuthHeaders(),
+      ...(init.headers as Record<string, string> | undefined),
+    },
+  })
+
+  if (res.status === 401) {
+    window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+  }
+
+  return res
+}
+
 export const api = {
   // AI交易员管理接口
   async getTraders(): Promise<TraderInfo[]> {
-    const res = await fetch(`${API_BASE}/my-traders`, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(`${API_BASE}/my-traders`)
     if (!res.ok) throw new Error('获取trader列表失败')
     return res.json()
   },
@@ -47,9 +65,8 @@ export const api = {
   },
 
   async createTrader(request: CreateTraderRequest): Promise<TraderInfo> {
-    const res = await fetch(`${API_BASE}/traders`, {
+    const res = await authFetch(`${API_BASE}/traders`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify(request),
     })
     if (!res.ok) throw new Error('创建交易员失败')
@@ -57,25 +74,22 @@ export const api = {
   },
 
   async deleteTrader(traderId: string): Promise<void> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}`, {
+    const res = await authFetch(`${API_BASE}/traders/${traderId}`, {
       method: 'DELETE',
-      headers: getAuthHeaders(),
     })
     if (!res.ok) throw new Error('删除交易员失败')
   },
 
   async startTrader(traderId: string): Promise<void> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}/start`, {
+    const res = await authFetch(`${API_BASE}/traders/${traderId}/start`, {
       method: 'POST',
-      headers: getAuthHeaders(),
     })
     if (!res.ok) throw new Error('启动交易员失败')
   },
 
   async stopTrader(traderId: string): Promise<void> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}/stop`, {
+    const res = await authFetch(`${API_BASE}/traders/${traderId}/stop`, {
       method: 'POST',
-      headers: getAuthHeaders(),
     })
     if (!res.ok) throw new Error('停止交易员失败')
   },
@@ -84,18 +98,15 @@ export const api = {
     traderId: string,
     customPrompt: string
   ): Promise<void> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}/prompt`, {
+    const res = await authFetch(`${API_BASE}/traders/${traderId}/prompt`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
       body: JSON.stringify({ custom_prompt: customPrompt }),
     })
     if (!res.ok) throw new Error('更新自定义策略失败')
   },
 
   async getTraderConfig(traderId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}/config`, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(`${API_BASE}/traders/${traderId}/config`)
     if (!res.ok) throw new Error('获取交易员配置失败')
     return res.json()
   },
@@ -104,9 +115,8 @@ export const api = {
     traderId: string,
     request: CreateTraderRequest
   ): Promise<TraderInfo> {
-    const res = await fetch(`${API_BASE}/traders/${traderId}`, {
+    const res = await authFetch(`${API_BASE}/traders/${traderId}`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
       body: JSON.stringify(request),
     })
     if (!res.ok) throw new Error('更新交易员失败')
@@ -115,9 +125,7 @@ export const api = {
 
   // AI模型配置接口
   async getModelConfigs(): Promise<AIModel[]> {
-    const res = await fetch(`${API_BASE}/models`, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(`${API_BASE}/models`)
     if (!res.ok) throw new Error('获取模型配置失败')
     return res.json()
   },
@@ -130,9 +138,8 @@ export const api = {
   },
 
   async updateModelConfigs(request: UpdateModelConfigRequest): Promise<void> {
-    const res = await fetch(`${API_BASE}/models`, {
+    const res = await authFetch(`${API_BASE}/models`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
       body: JSON.stringify(request),
     })
     if (!res.ok) throw new Error('更新模型配置失败')
@@ -140,9 +147,7 @@ export const api = {
 
   // 交易所配置接口
   async getExchangeConfigs(): Promise<Exchange[]> {
-    const res = await fetch(`${API_BASE}/exchanges`, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(`${API_BASE}/exchanges`)
     if (!res.ok) throw new Error('获取交易所配置失败')
     return res.json()
   },
@@ -157,9 +162,8 @@ export const api = {
   async updateExchangeConfigs(
     request: UpdateExchangeConfigRequest
   ): Promise<void> {
-    const res = await fetch(`${API_BASE}/exchanges`, {
+    const res = await authFetch(`${API_BASE}/exchanges`, {
       method: 'PUT',
-      headers: getAuthHeaders(),
       body: JSON.stringify(request),
     })
     if (!res.ok) throw new Error('更新交易所配置失败')
@@ -170,9 +174,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/status?trader_id=${traderId}`
       : `${API_BASE}/status`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取系统状态失败')
     return res.json()
   },
@@ -182,17 +184,14 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/account?trader_id=${traderId}`
       : `${API_BASE}/account`
-    const res = await fetch(url, {
+    const res = await authFetch(url, {
       cache: 'no-store',
       headers: {
-        ...getAuthHeaders(),
         'Cache-Control': 'no-cache',
       },
     })
     if (!res.ok) throw new Error('获取账户信息失败')
-    const data = await res.json()
-    console.log('Account data fetched:', data)
-    return data
+    return res.json()
   },
 
   // 获取持仓列表（支持trader_id）
@@ -200,9 +199,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/positions?trader_id=${traderId}`
       : `${API_BASE}/positions`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取持仓列表失败')
     return res.json()
   },
@@ -212,9 +209,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/decisions?trader_id=${traderId}`
       : `${API_BASE}/decisions`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取决策日志失败')
     return res.json()
   },
@@ -224,9 +219,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/decisions/latest?trader_id=${traderId}`
       : `${API_BASE}/decisions/latest`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取最新决策失败')
     return res.json()
   },
@@ -236,9 +229,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/statistics?trader_id=${traderId}`
       : `${API_BASE}/statistics`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取统计信息失败')
     return res.json()
   },
@@ -248,9 +239,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/equity-history?trader_id=${traderId}`
       : `${API_BASE}/equity-history`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取历史数据失败')
     return res.json()
   },
@@ -277,7 +266,7 @@ export const api = {
 
   // 获取公开交易员配置（无需认证）
   async getPublicTraderConfig(traderId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/trader/${traderId}/config`)
+    const res = await fetch(`${API_BASE}/traders/${traderId}/public-config`)
     if (!res.ok) throw new Error('获取公开交易员配置失败')
     return res.json()
   },
@@ -287,9 +276,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/performance?trader_id=${traderId}`
       : `${API_BASE}/performance`
-    const res = await fetch(url, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(url)
     if (!res.ok) throw new Error('获取AI学习数据失败')
     return res.json()
   },
@@ -306,9 +293,7 @@ export const api = {
     coin_pool_url: string
     oi_top_url: string
   }> {
-    const res = await fetch(`${API_BASE}/user/signal-sources`, {
-      headers: getAuthHeaders(),
-    })
+    const res = await authFetch(`${API_BASE}/user/signal-sources`)
     if (!res.ok) throw new Error('获取用户信号源配置失败')
     return res.json()
   },
@@ -317,9 +302,8 @@ export const api = {
     coinPoolUrl: string,
     oiTopUrl: string
   ): Promise<void> {
-    const res = await fetch(`${API_BASE}/user/signal-sources`, {
+    const res = await authFetch(`${API_BASE}/user/signal-sources`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify({
         coin_pool_url: coinPoolUrl,
         oi_top_url: oiTopUrl,
