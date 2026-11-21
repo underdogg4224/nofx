@@ -1,9 +1,7 @@
 package config
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -258,7 +256,7 @@ func (d *Database) initDefaultData() error {
 
 	// 初始化系统配置 - 创建所有字段，设置默认值，后续由config.json同步更新
 	systemConfigs := map[string]string{
-		"admin_mode":            "true",                                                                                // 默认开启管理员模式，便于首次使用
+		"admin_mode":            "false",                                                                               // 默认关闭管理员模式，保障认证安全
 		"beta_mode":             "false",                                                                             // 默认关闭内测模式
 		"api_server_port":       "8080",                                                                                // 默认API端口
 		"use_default_coins":     "true",                                                                                // 默认使用内置币种列表
@@ -442,16 +440,6 @@ type UserSignalSource struct {
 	OITopURL    string    `json:"oi_top_url"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
-}
-
-// GenerateOTPSecret 生成OTP密钥
-func GenerateOTPSecret() (string, error) {
-	secret := make([]byte, 20)
-	_, err := rand.Read(secret)
-	if err != nil {
-		return "", err
-	}
-	return base32.StdEncoding.EncodeToString(secret), nil
 }
 
 // CreateUser 创建用户

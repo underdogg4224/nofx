@@ -40,6 +40,14 @@ type ConfigFile struct {
 	DataKLineTime      string         `json:"data_k_line_time"`
 }
 
+// isInsecureJWTSecret detects empty or publicly leaked example JWT secrets.
+func isInsecureJWTSecret(secret string) bool {
+	s := strings.TrimSpace(secret)
+	return s == "" ||
+		s == "your-jwt-secret-key-change-in-production-make-it-long-and-random" ||
+		s == "Qk0kAa+d0iIEzXVHXbNbm+UaN3RNabmWtH8rDWZ5OPf+4GX8pBflAHodfpbipVMyrw1fsDanHsNBjhgbDeK9Jg=="
+}
+
 // syncConfigToDatabase 从config.json读取配置并同步到数据库
 func syncConfigToDatabase(database *config.Database) error {
 	// 检查config.json是否存在
@@ -91,8 +99,8 @@ func syncConfigToDatabase(database *config.Database) error {
 		configs["altcoin_leverage"] = strconv.Itoa(configFile.Leverage.AltcoinLeverage)
 	}
 
-	// 如果JWT密钥不为空，也同步
-	if configFile.JWTSecret != "" {
+	// 如果JWT密钥不为空且非示例占位值，也同步
+	if !isInsecureJWTSecret(configFile.JWTSecret) {
 		configs["jwt_secret"] = configFile.JWTSecret
 	}
 
@@ -100,6 +108,8 @@ func syncConfigToDatabase(database *config.Database) error {
 	for key, value := range configs {
 		if err := database.SetSystemConfig(key, value); err != nil {
 			log.Printf("⚠️  更新配置 %s 失败: %v", key, err)
+		} else if key == "jwt_secret" {
+			log.Printf("✓ 同步配置: %s = [REDACTED]", key)
 		} else {
 			log.Printf("✓ 同步配置: %s = %s", key, value)
 		}
@@ -178,15 +188,22 @@ func main() {
 	useDefaultCoins := useDefaultCoinsStr == "true"
 	apiPortStr, _ := database.GetSystemConfig("api_server_port")
 
-	// 获取管理员模式配置
+	// 获取管理员模式配置（默认关闭，需显式启用）
 	adminModeStr, _ := database.GetSystemConfig("admin_mode")
-	adminMode := adminModeStr != "false" // 默认为true
+	adminMode := adminModeStr == "true"
 
-	// 设置JWT密钥
+	// 设置JWT密钥：未配置或为公开示例密钥时，自动生成随机密钥并持久化
 	jwtSecret, _ := database.GetSystemConfig("jwt_secret")
-	if jwtSecret == "" {
-		jwtSecret = "your-jwt-secret-key-change-in-production-make-it-long-and-random"
-		log.Printf("⚠️  使用默认JWT密钥，建议在生产环境中配置")
+	if isInsecureJWTSecret(jwtSecret) {
+		generated, err := auth.GenerateRandomSecret(32)
+		if err != nil {
+			log.Fatalf("❌ 生成随机JWT密钥失败: %v", err)
+		}
+		if err := database.SetSystemConfig("jwt_secret", generated); err != nil {
+			log.Printf("⚠️  持久化自动生成的JWT密钥失败: %v", err)
+		}
+		jwtSecret = generated
+		log.Printf("✓ 已自动生成并保存随机JWT密钥")
 	}
 	auth.SetJWTSecret(jwtSecret)
 
@@ -196,9 +213,11 @@ func main() {
 		if err != nil {
 			log.Printf("⚠️  创建admin用户失败: %v", err)
 		} else {
-			log.Printf("✓ 管理员模式已启用，无需登录")
+			log.Printf("⚠️  警告: 管理员模式已启用，将跳过所有API认证，请勿将服务直接暴露到公网")
 		}
 		auth.SetAdminMode(true)
+	} else {
+		auth.SetAdminMode(false)
 	}
 
 	log.Printf("✓ 配置数据库初始化成功")

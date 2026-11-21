@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -9,6 +10,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
+)
+
+const (
+	tokenPurposeAccess    = "access"
+	tokenPurposeOTPVerify = "otp_verify"
+	otpChallengeTTL       = 5 * time.Minute
 )
 
 // JWTSecret JWT密钥，将从配置中动态设置
@@ -35,10 +42,23 @@ func IsAdminMode() bool {
 	return AdminMode
 }
 
+// GenerateRandomSecret generates a cryptographically secure hex-encoded secret.
+func GenerateRandomSecret(numBytes int) (string, error) {
+	if numBytes < 16 {
+		numBytes = 32
+	}
+	buf := make([]byte, numBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
 // Claims JWT声明
 type Claims struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
+	UserID  string `json:"user_id"`
+	Email   string `json:"email"`
+	Purpose string `json:"purpose,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -56,12 +76,6 @@ func CheckPassword(password, hash string) bool {
 
 // GenerateOTPSecret 生成OTP密钥
 func GenerateOTPSecret() (string, error) {
-	secret := make([]byte, 20)
-	_, err := rand.Read(secret)
-	if err != nil {
-		return "", err
-	}
-
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      OTPIssuer,
 		AccountName: uuid.New().String(),
@@ -80,14 +94,42 @@ func VerifyOTP(secret, code string) bool {
 
 // GenerateJWT 生成JWT token
 func GenerateJWT(userID, email string) (string, error) {
+	if len(JWTSecret) == 0 {
+		return "", fmt.Errorf("JWT密钥未配置")
+	}
+
 	claims := Claims{
-		UserID: userID,
-		Email:  email,
+		UserID:  userID,
+		Email:   email,
+		Purpose: tokenPurposeAccess,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // 24小时过期
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    "nofxAI",
+			Issuer:    OTPIssuer,
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(JWTSecret)
+}
+
+// GenerateOTPChallenge issues a short-lived signed token proving password authentication succeeded.
+func GenerateOTPChallenge(userID, email string) (string, error) {
+	if len(JWTSecret) == 0 {
+		return "", fmt.Errorf("JWT密钥未配置")
+	}
+
+	now := time.Now()
+	claims := Claims{
+		UserID:  userID,
+		Email:   email,
+		Purpose: tokenPurposeOTPVerify,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(now.Add(otpChallengeTTL)),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			Issuer:    OTPIssuer,
 		},
 	}
 
@@ -97,22 +139,55 @@ func GenerateJWT(userID, email string) (string, error) {
 
 // ValidateJWT 验证JWT token
 func ValidateJWT(tokenString string) (*Claims, error) {
+	if len(JWTSecret) == 0 {
+		return nil, fmt.Errorf("JWT密钥未配置")
+	}
+
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("意外的签名方法: %v", token.Header["alg"])
 		}
 		return JWTSecret, nil
-	})
+	}, jwt.WithIssuer(OTPIssuer))
 
 	if err != nil {
 		return nil, err
 	}
 
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
+		// Reject OTP challenge tokens from being used as access tokens.
+		if claims.Purpose == tokenPurposeOTPVerify {
+			return nil, fmt.Errorf("无效的token用途")
+		}
 		return claims, nil
 	}
 
 	return nil, fmt.Errorf("无效的token")
+}
+
+// ValidateOTPChallenge verifies a short-lived OTP challenge token for the expected user.
+func ValidateOTPChallenge(tokenString, expectedUserID string) (*Claims, error) {
+	if len(JWTSecret) == 0 {
+		return nil, fmt.Errorf("JWT密钥未配置")
+	}
+
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("意外的签名方法: %v", token.Header["alg"])
+		}
+		return JWTSecret, nil
+	}, jwt.WithIssuer(OTPIssuer))
+
+	if err != nil {
+		return nil, err
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid || claims.Purpose != tokenPurposeOTPVerify || claims.UserID != expectedUserID {
+		return nil, fmt.Errorf("无效的OTP验证会话")
+	}
+
+	return claims, nil
 }
 
 // GetOTPQRCodeURL 获取OTP二维码URL

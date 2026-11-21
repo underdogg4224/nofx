@@ -9,6 +9,7 @@ import (
 	"nofx/config"
 	"nofx/decision"
 	"nofx/manager"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +20,11 @@ import (
 
 // Server HTTP API服务器
 type Server struct {
-	router        *gin.Engine
-	traderManager *manager.TraderManager
-	database      *config.Database
-	port          int
+	router          *gin.Engine
+	traderManager   *manager.TraderManager
+	database        *config.Database
+	port            int
+	authRateLimiter *auth.RateLimiter
 }
 
 // NewServer 创建API服务器
@@ -32,14 +34,15 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 
 	router := gin.Default()
 
-	// 启用CORS
+	// 启用CORS与基础安全响应头
 	router.Use(corsMiddleware())
 
 	s := &Server{
-		router:        router,
-		traderManager: traderManager,
-		database:      database,
-		port:          port,
+		router:          router,
+		traderManager:   traderManager,
+		database:        database,
+		port:            port,
+		authRateLimiter: auth.NewRateLimiter(15, time.Minute),
 	}
 
 	// 设置路由
@@ -50,16 +53,52 @@ func NewServer(traderManager *manager.TraderManager, database *config.Database, 
 
 // corsMiddleware CORS中间件
 func corsMiddleware() gin.HandlerFunc {
+	allowedOriginsRaw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	var allowedOrigins map[string]struct{}
+	if allowedOriginsRaw != "" {
+		allowedOrigins = make(map[string]struct{})
+		for _, origin := range strings.Split(allowedOriginsRaw, ",") {
+			origin = strings.TrimSpace(origin)
+			if origin != "" {
+				allowedOrigins[origin] = struct{}{}
+			}
+		}
+	}
+
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		if len(allowedOrigins) > 0 {
+			if _, ok := allowedOrigins[origin]; ok {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+				c.Writer.Header().Set("Vary", "Origin")
+			}
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
+		c.Writer.Header().Set("X-Frame-Options", "DENY")
+		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusOK)
 			return
 		}
 
+		c.Next()
+	}
+}
+
+// authRateLimitMiddleware limits request rate per client IP and path for auth endpoints.
+func (s *Server) authRateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.ClientIP() + ":" + c.FullPath()
+		if !s.authRateLimiter.Allow(key) {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁，请稍后再试"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -72,11 +111,14 @@ func (s *Server) setupRoutes() {
 		// 健康检查
 		api.Any("/health", s.handleHealth)
 
-		// 认证相关路由（无需认证）
-		api.POST("/register", s.handleRegister)
-		api.POST("/login", s.handleLogin)
-		api.POST("/verify-otp", s.handleVerifyOTP)
-		api.POST("/complete-registration", s.handleCompleteRegistration)
+		// 认证相关路由（无需认证，启用限流防爆破）
+		authRoutes := api.Group("/", s.authRateLimitMiddleware())
+		{
+			authRoutes.POST("/register", s.handleRegister)
+			authRoutes.POST("/login", s.handleLogin)
+			authRoutes.POST("/verify-otp", s.handleVerifyOTP)
+			authRoutes.POST("/complete-registration", s.handleCompleteRegistration)
+		}
 
 		// 系统支持的模型和交易所（无需认证）
 		api.GET("/supported-models", s.handleGetSupportedModels)
@@ -1183,7 +1225,8 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 		// 验证JWT token
 		claims, err := auth.ValidateJWT(tokenParts[1])
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的token: " + err.Error()})
+			log.Printf("⚠️ JWT验证失败: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "无效的token"})
 			c.Abort()
 			return
 		}
@@ -1308,6 +1351,11 @@ func (s *Server) handleCompleteRegistration(c *gin.Context) {
 		return
 	}
 
+	if user.OTPVerified {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该账户已完成注册验证，请直接登录"})
+		return
+	}
+
 	// 验证OTP
 	if !auth.VerifyOTP(user.OTPSecret, req.OTPCode) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "OTP验证码错误"})
@@ -1377,10 +1425,18 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
+	// 生成短期OTP验证会话令牌，将OTP验证绑定到已通过密码校验的登录会话
+	otpToken, err := auth.GenerateOTPChallenge(user.ID, user.Email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建OTP验证会话失败"})
+		return
+	}
+
 	// 返回需要OTP验证的状态
 	c.JSON(http.StatusOK, gin.H{
 		"user_id":      user.ID,
 		"email":        user.Email,
+		"otp_token":    otpToken,
 		"message":      "请输入Google Authenticator验证码",
 		"requires_otp": true,
 	})
@@ -1389,8 +1445,9 @@ func (s *Server) handleLogin(c *gin.Context) {
 // handleVerifyOTP 验证OTP并完成登录
 func (s *Server) handleVerifyOTP(c *gin.Context) {
 	var req struct {
-		UserID  string `json:"user_id" binding:"required"`
-		OTPCode string `json:"otp_code" binding:"required"`
+		UserID   string `json:"user_id" binding:"required"`
+		OTPCode  string `json:"otp_code" binding:"required"`
+		OTPToken string `json:"otp_token" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1398,10 +1455,21 @@ func (s *Server) handleVerifyOTP(c *gin.Context) {
 		return
 	}
 
+	// 校验OTP会话令牌，确保调用方已通过密码验证
+	if _, err := auth.ValidateOTPChallenge(req.OTPToken, req.UserID); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "登录会话已过期，请重新输入密码登录"})
+		return
+	}
+
 	// 获取用户信息
 	user, err := s.database.GetUserByID(req.UserID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "用户不存在"})
+		return
+	}
+
+	if !user.OTPVerified {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "账户未完成OTP设置"})
 		return
 	}
 

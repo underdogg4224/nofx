@@ -16,6 +16,7 @@ interface AuthContextType {
     success: boolean
     message?: string
     userID?: string
+    otpToken?: string
     requiresOTP?: boolean
   }>
   register: (
@@ -31,7 +32,8 @@ interface AuthContextType {
   }>
   verifyOTP: (
     userID: string,
-    otpCode: string
+    otpCode: string,
+    otpToken: string
   ) => Promise<{ success: boolean; message?: string }>
   completeRegistration: (
     userID: string,
@@ -99,6 +101,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return {
             success: true,
             userID: data.user_id,
+            otpToken: data.otp_token,
             requiresOTP: true,
             message: data.message,
           }
@@ -154,14 +157,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  const verifyOTP = async (userID: string, otpCode: string) => {
+  const verifyOTP = async (
+    userID: string,
+    otpCode: string,
+    otpToken: string
+  ) => {
     try {
       const response = await fetch('/api/verify-otp', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ user_id: userID, otp_code: otpCode }),
+        body: JSON.stringify({
+          user_id: userID,
+          otp_code: otpCode,
+          otp_token: otpToken,
+        }),
       })
 
       const data = await response.json()

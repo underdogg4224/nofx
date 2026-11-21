@@ -5,13 +5,14 @@ import { t } from '../i18n/translations'
 import HeaderBar from './landing/HeaderBar'
 
 export function LoginPage() {
-  const { language } = useLanguage()
+  const { language, setLanguage } = useLanguage()
   const { login, verifyOTP } = useAuth()
   const [step, setStep] = useState<'login' | 'otp'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [otpCode, setOtpCode] = useState('')
   const [userID, setUserID] = useState('')
+  const [otpToken, setOtpToken] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -25,6 +26,7 @@ export function LoginPage() {
     if (result.success) {
       if (result.requiresOTP && result.userID) {
         setUserID(result.userID)
+        setOtpToken(result.otpToken || '')
         setStep('otp')
       }
     } else {
@@ -39,7 +41,7 @@ export function LoginPage() {
     setError('')
     setLoading(true)
 
-    const result = await verifyOTP(userID, otpCode)
+    const result = await verifyOTP(userID, otpCode, otpToken)
 
     if (!result.success) {
       setError(result.message || t('verificationFailed', language))
@@ -57,7 +59,7 @@ export function LoginPage() {
         isHomePage={false}
         currentPage="login"
         language={language}
-        onLanguageChange={() => {}}
+        onLanguageChange={setLanguage}
         onPageChange={(page) => {
           console.log('LoginPage onPageChange called with:', page)
           if (page === 'competition') {
