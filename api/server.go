@@ -744,7 +744,7 @@ func (s *Server) handleGetModelConfigs(c *gin.Context) {
 	}
 	log.Printf("✅ 找到 %d 个AI模型配置", len(models))
 
-	c.JSON(http.StatusOK, models)
+	c.JSON(http.StatusOK, sanitizeAIModels(models))
 }
 
 // handleUpdateModelConfigs 更新AI模型配置
@@ -756,13 +756,37 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		return
 	}
 
-	// 更新每个模型的配置
+	// 预先校验所有自定义API URL，防止SSRF
 	for modelID, modelData := range req.Models {
-		err := s.database.UpdateAIModel(userID, modelID, modelData.Enabled, modelData.APIKey, modelData.CustomAPIURL, modelData.CustomModelName)
+		if err := ValidateExternalURL(modelData.CustomAPIURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("模型 %s 的自定义API URL无效: %v", modelID, err)})
+			return
+		}
+	}
+
+	// 查询现有配置以在脱敏占位符或局部编辑时保留已有密钥
+	existingModels, _ := s.database.GetAIModels(userID)
+	existingByKey := make(map[string]*config.AIModelConfig, len(existingModels)*2)
+	for _, m := range existingModels {
+		existingByKey[m.ID] = m
+		existingByKey[m.Provider] = m
+	}
+
+	// 更新每个模型的配置
+	updatedIDs := make([]string, 0, len(req.Models))
+	for modelID, modelData := range req.Models {
+		existingKey := ""
+		if existing, ok := existingByKey[modelID]; ok {
+			existingKey = existing.APIKey
+		}
+		apiKey := resolveSecretUpdate(modelData.APIKey, existingKey, modelData.Enabled)
+
+		err := s.database.UpdateAIModel(userID, modelID, modelData.Enabled, apiKey, modelData.CustomAPIURL, modelData.CustomModelName)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新模型 %s 失败: %v", modelID, err)})
 			return
 		}
+		updatedIDs = append(updatedIDs, modelID)
 	}
 
 	// 重新加载该用户的所有交易员，使新配置立即生效
@@ -772,7 +796,7 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		// 这里不返回错误，因为模型配置已经成功更新到数据库
 	}
 
-	log.Printf("✓ AI模型配置已更新: %+v", req.Models)
+	log.Printf("✓ 用户 %s 的AI模型配置已更新: %v", userID, updatedIDs)
 	c.JSON(http.StatusOK, gin.H{"message": "模型配置已更新"})
 }
 
@@ -788,7 +812,7 @@ func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
 	}
 	log.Printf("✅ 找到 %d 个交易所配置", len(exchanges))
 
-	c.JSON(http.StatusOK, exchanges)
+	c.JSON(http.StatusOK, sanitizeExchanges(exchanges))
 }
 
 // handleUpdateExchangeConfigs 更新交易所配置
@@ -800,13 +824,33 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 		return
 	}
 
+	// 查询现有配置以在脱敏占位符或局部编辑时保留已有密钥/私钥
+	existingExchanges, _ := s.database.GetExchanges(userID)
+	existingByID := make(map[string]*config.ExchangeConfig, len(existingExchanges))
+	for _, e := range existingExchanges {
+		existingByID[e.ID] = e
+	}
+
 	// 更新每个交易所的配置
+	updatedIDs := make([]string, 0, len(req.Exchanges))
 	for exchangeID, exchangeData := range req.Exchanges {
-		err := s.database.UpdateExchange(userID, exchangeID, exchangeData.Enabled, exchangeData.APIKey, exchangeData.SecretKey, exchangeData.Testnet, exchangeData.HyperliquidWalletAddr, exchangeData.AsterUser, exchangeData.AsterSigner, exchangeData.AsterPrivateKey)
+		var existingAPIKey, existingSecretKey, existingAsterPrivateKey string
+		if existing, ok := existingByID[exchangeID]; ok {
+			existingAPIKey = existing.APIKey
+			existingSecretKey = existing.SecretKey
+			existingAsterPrivateKey = existing.AsterPrivateKey
+		}
+
+		apiKey := resolveSecretUpdate(exchangeData.APIKey, existingAPIKey, exchangeData.Enabled)
+		secretKey := resolveSecretUpdate(exchangeData.SecretKey, existingSecretKey, exchangeData.Enabled)
+		asterPrivateKey := resolveSecretUpdate(exchangeData.AsterPrivateKey, existingAsterPrivateKey, exchangeData.Enabled)
+
+		err := s.database.UpdateExchange(userID, exchangeID, exchangeData.Enabled, apiKey, secretKey, exchangeData.Testnet, exchangeData.HyperliquidWalletAddr, exchangeData.AsterUser, exchangeData.AsterSigner, asterPrivateKey)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新交易所 %s 失败: %v", exchangeID, err)})
 			return
 		}
+		updatedIDs = append(updatedIDs, exchangeID)
 	}
 
 	// 重新加载该用户的所有交易员，使新配置立即生效
@@ -816,7 +860,7 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 		// 这里不返回错误，因为交易所配置已经成功更新到数据库
 	}
 
-	log.Printf("✓ 交易所配置已更新: %+v", req.Exchanges)
+	log.Printf("✓ 用户 %s 的交易所配置已更新: %v", userID, updatedIDs)
 	c.JSON(http.StatusOK, gin.H{"message": "交易所配置已更新"})
 }
 
@@ -849,6 +893,15 @@ func (s *Server) handleSaveUserSignalSource(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := ValidateExternalURL(req.CoinPoolURL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("币种池URL无效: %v", err)})
+		return
+	}
+	if err := ValidateExternalURL(req.OITopURL); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("OI Top URL无效: %v", err)})
 		return
 	}
 
@@ -1561,7 +1614,7 @@ func (s *Server) handleGetSupportedModels(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, models)
+	c.JSON(http.StatusOK, sanitizeAIModels(models))
 }
 
 // handleGetSupportedExchanges 获取系统支持的交易所列表
@@ -1574,7 +1627,7 @@ func (s *Server) handleGetSupportedExchanges(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, exchanges)
+	c.JSON(http.StatusOK, sanitizeExchanges(exchanges))
 }
 
 // Start 启动服务器

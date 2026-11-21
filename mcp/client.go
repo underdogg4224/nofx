@@ -74,9 +74,8 @@ func (client *Client) SetDeepSeekAPIKey(apiKey string, customURL string, customM
 		client.Model = "deepseek-chat"
 		log.Printf("🔧 [MCP] DeepSeek 使用默认 Model: %s", client.Model)
 	}
-	// 打印 API Key 的前后各4位用于验证
-	if len(apiKey) > 8 {
-		log.Printf("🔧 [MCP] DeepSeek API Key: %s...%s", apiKey[:4], apiKey[len(apiKey)-4:])
+	if apiKey != "" {
+		log.Printf("🔧 [MCP] DeepSeek API Key 已配置")
 	}
 }
 
@@ -96,12 +95,11 @@ func (client *Client) SetQwenAPIKey(apiKey string, customURL string, customModel
 		client.Model = customModel
 		log.Printf("🔧 [MCP] Qwen 使用自定义 Model: %s", customModel)
 	} else {
-		client.Model = "qwen3-max" 
+		client.Model = "qwen3-max"
 		log.Printf("🔧 [MCP] Qwen 使用默认 Model: %s", client.Model)
 	}
-	// 打印 API Key 的前后各4位用于验证
-	if len(apiKey) > 8 {
-		log.Printf("🔧 [MCP] Qwen API Key: %s...%s", apiKey[:4], apiKey[len(apiKey)-4:])
+	if apiKey != "" {
+		log.Printf("🔧 [MCP] Qwen API Key 已配置")
 	}
 }
 
