@@ -1,7 +1,9 @@
 package api
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +19,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+var errTraderForbidden = errors.New("交易员不存在或无访问权限")
 
 // Server HTTP API服务器
 type Server struct {
@@ -135,7 +139,6 @@ func (s *Server) setupRoutes() {
 		api.GET("/traders", s.handlePublicTraderList)
 		api.GET("/competition", s.handlePublicCompetition)
 		api.GET("/top-traders", s.handleTopTraders)
-		api.GET("/equity-history", s.handleEquityHistory)
 		api.POST("/equity-history-batch", s.handleEquityHistoryBatch)
 		api.GET("/traders/:id/public-config", s.handleGetPublicTraderConfig)
 
@@ -171,6 +174,7 @@ func (s *Server) setupRoutes() {
 			protected.GET("/decisions", s.handleDecisions)
 			protected.GET("/decisions/latest", s.handleLatestDecisions)
 			protected.GET("/statistics", s.handleStatistics)
+			protected.GET("/equity-history", s.handleEquityHistory)
 			protected.GET("/performance", s.handlePerformance)
 		}
 	}
@@ -224,9 +228,13 @@ func (s *Server) handleGetSystemConfig(c *gin.Context) {
 	})
 }
 
-// getTraderFromQuery 从query参数获取trader
+// getTraderFromQuery 从query参数获取trader并验证归属权
 func (s *Server) getTraderFromQuery(c *gin.Context) (*manager.TraderManager, string, error) {
 	userID := c.GetString("user_id")
+	if userID == "" {
+		return nil, "", errTraderForbidden
+	}
+
 	traderID := c.Query("trader_id")
 
 	// 确保用户的交易员已加载到内存中
@@ -236,22 +244,33 @@ func (s *Server) getTraderFromQuery(c *gin.Context) (*manager.TraderManager, str
 	}
 
 	if traderID == "" {
-		// 如果没有指定trader_id，返回该用户的第一个trader
-		ids := s.traderManager.GetTraderIDs()
-		if len(ids) == 0 {
+		// 如果没有指定trader_id，仅返回该用户自己的第一个trader，绝不回退到其他用户的trader
+		userTraders, err := s.database.GetTraders(userID)
+		if err != nil || len(userTraders) == 0 {
 			return nil, "", fmt.Errorf("没有可用的trader")
 		}
-
-		// 获取用户的交易员列表，优先返回用户自己的交易员
-		userTraders, err := s.database.GetTraders(userID)
-		if err == nil && len(userTraders) > 0 {
-			traderID = userTraders[0].ID
-		} else {
-			traderID = ids[0]
+		traderID = userTraders[0].ID
+	} else {
+		// 严格校验交易员归属权，防止IDOR越权访问
+		owned, err := s.database.VerifyTraderOwnership(userID, traderID)
+		if err != nil {
+			return nil, "", fmt.Errorf("校验交易员权限失败: %w", err)
+		}
+		if !owned {
+			return nil, "", errTraderForbidden
 		}
 	}
 
 	return s.traderManager, traderID, nil
+}
+
+// writeTraderQueryError writes an appropriate HTTP status for getTraderFromQuery failures.
+func writeTraderQueryError(c *gin.Context, err error) {
+	if errors.Is(err, errTraderForbidden) {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 }
 
 // AI交易员管理相关结构体
@@ -344,8 +363,8 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		}
 	}
 
-	// 生成交易员ID
-	traderID := fmt.Sprintf("%s_%s_%d", req.ExchangeID, req.AIModelID, time.Now().Unix())
+	// 生成不可预测的交易员ID
+	traderID := fmt.Sprintf("%s_%s_%s", req.ExchangeID, req.AIModelID, strings.ReplaceAll(uuid.New().String(), "-", "")[:12])
 
 	// 设置默认值
 	isCrossMargin := true // 默认为全仓模式
@@ -460,6 +479,28 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		return
 	}
 
+	// 校验杠杆值
+	if req.BTCETHLeverage < 0 || req.BTCETHLeverage > 50 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "BTC/ETH杠杆必须在1-50倍之间"})
+		return
+	}
+	if req.AltcoinLeverage < 0 || req.AltcoinLeverage > 20 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "山寨币杠杆必须在1-20倍之间"})
+		return
+	}
+
+	// 校验交易币种格式
+	if req.TradingSymbols != "" {
+		symbols := strings.Split(req.TradingSymbols, ",")
+		for _, symbol := range symbols {
+			symbol = strings.TrimSpace(symbol)
+			if symbol != "" && !strings.HasSuffix(strings.ToUpper(symbol), "USDT") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无效的币种格式: %s，必须以USDT结尾", symbol)})
+				return
+			}
+		}
+	}
+
 	// 检查交易员是否存在且属于当前用户
 	traders, err := s.database.GetTraders(userID)
 	if err != nil {
@@ -549,14 +590,18 @@ func (s *Server) handleDeleteTrader(c *gin.Context) {
 	userID := c.GetString("user_id")
 	traderID := c.Param("id")
 
-	// 从数据库删除
+	// 从数据库删除（仅限当前用户拥有的交易员）
 	err := s.database.DeleteTrader(userID, traderID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在或无访问权限"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("删除交易员失败: %v", err)})
 		return
 	}
 
-	// 如果交易员正在运行，先停止它
+	// 仅在确认所有权并成功删除数据库记录后，停止内存中的交易员
 	if trader, err := s.traderManager.GetTrader(traderID); err == nil {
 		status := trader.GetStatus()
 		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
@@ -665,9 +710,13 @@ func (s *Server) handleUpdateTraderPrompt(c *gin.Context) {
 		return
 	}
 
-	// 更新数据库
+	// 更新数据库（仅限当前用户拥有的交易员）
 	err := s.database.UpdateTraderCustomPrompt(userID, traderID, req.CustomPrompt, req.OverrideBasePrompt)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在或无访问权限"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新自定义prompt失败: %v", err)})
 		return
 	}
@@ -908,7 +957,7 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 func (s *Server) handleStatus(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -926,7 +975,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 func (s *Server) handleAccount(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -959,7 +1008,7 @@ func (s *Server) handleAccount(c *gin.Context) {
 func (s *Server) handlePositions(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -984,7 +1033,7 @@ func (s *Server) handlePositions(c *gin.Context) {
 func (s *Server) handleDecisions(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -1010,7 +1059,7 @@ func (s *Server) handleDecisions(c *gin.Context) {
 func (s *Server) handleLatestDecisions(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -1041,7 +1090,7 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 func (s *Server) handleStatistics(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -1087,7 +1136,7 @@ func (s *Server) handleCompetition(c *gin.Context) {
 func (s *Server) handleEquityHistory(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 
@@ -1173,7 +1222,7 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 func (s *Server) handlePerformance(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		writeTraderQueryError(c, err)
 		return
 	}
 

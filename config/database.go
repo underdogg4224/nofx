@@ -835,16 +835,49 @@ func (d *Database) UpdateTrader(trader *TraderRecord) error {
 	return err
 }
 
+// VerifyTraderOwnership checks whether traderID belongs to userID.
+func (d *Database) VerifyTraderOwnership(userID, traderID string) (bool, error) {
+	if userID == "" || traderID == "" {
+		return false, nil
+	}
+	var count int
+	err := d.db.QueryRow(`SELECT COUNT(1) FROM traders WHERE id = ? AND user_id = ?`, traderID, userID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // UpdateTraderCustomPrompt 更新交易员自定义Prompt
 func (d *Database) UpdateTraderCustomPrompt(userID, id string, customPrompt string, overrideBase bool) error {
-	_, err := d.db.Exec(`UPDATE traders SET custom_prompt = ?, override_base_prompt = ? WHERE id = ? AND user_id = ?`, customPrompt, overrideBase, id, userID)
-	return err
+	result, err := d.db.Exec(`UPDATE traders SET custom_prompt = ?, override_base_prompt = ? WHERE id = ? AND user_id = ?`, customPrompt, overrideBase, id, userID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // DeleteTrader 删除交易员
 func (d *Database) DeleteTrader(userID, id string) error {
-	_, err := d.db.Exec(`DELETE FROM traders WHERE id = ? AND user_id = ?`, id, userID)
-	return err
+	result, err := d.db.Exec(`DELETE FROM traders WHERE id = ? AND user_id = ?`, id, userID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // GetTraderConfig 获取交易员完整配置（包含AI模型和交易所信息）
